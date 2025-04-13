@@ -4,19 +4,22 @@ import time
 import random
 import torch.nn.functional as F
 from decimal import Decimal, ROUND_HALF_UP
+import os
 
 from transformers import logging
 logging.set_verbosity_error()
+
 
 class MultilingualFluencyScorer: #采用滑动窗口
 	def __init__(self, window_size=5,model_name="bert-base-multilingual-cased",bert_path="bert-base-multilingual-cased",local_path="../prompt_model/pretrain_model/bert-base-multilingual-cased", batch_size=20):
 		self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 		self.window_size = window_size
 		try:
-			self.model = BertForMaskedLM.from_pretrained(local_path).to(self.device) #读入模型以及参数
-			self.tokenizer = BertTokenizer.from_pretrained(local_path) #分词器
+			file_dir = os.path.dirname(__file__)+"/"
+			self.model = BertForMaskedLM.from_pretrained(file_dir+local_path).to(self.device) #读入模型以及参数
+			self.tokenizer = BertTokenizer.from_pretrained(file_dir+local_path) #分词器
 		except:
-			print("Failed to load local pretrain_model")
+			print("Failed to load local pretrain_model in fluency_evaluation.py")
 			self.model = BertForMaskedLM.from_pretrained(bert_path).to(self.device) #读入模型以及参数
 			self.tokenizer = BertTokenizer.from_pretrained(bert_path) #分词器
 		self.model.eval()
@@ -35,7 +38,7 @@ class MultilingualFluencyScorer: #采用滑动窗口
 			for i in range(0, len(lst), chunk_size):
 				yield lst[i:i + chunk_size]
 
-	def _windows_padding(self,idx,tensor): #获取相应内容
+	def _windows_padding(self,idx,tensor): #获取滑动窗口截取并掩码后的embedding内容（用作bert输入文本）以及对应的attention_mask
 		tmp=idx - self.window_size
 		if tmp<=0:
 			left_pad=-tmp
@@ -59,8 +62,10 @@ class MultilingualFluencyScorer: #采用滑动窗口
 	def _evaluate_score(self,prob_list,low_boundary,weight_low_basic,weight_low_max,max_prob,asy_e): 
 		"""
 		采用加权方式求最终分数，默认低概率为<0.1的作为低分数分界线。根据程序运行结果判断prob最高为0.5
-		asy_e为渐进系数，越大代表在监测到低概率时权重增加的速度越快
+		asy_e为渐进系数，越大代表在监测到低概率时权重增加的速度越快，asy_e为1时10次加到最大
 		"""
+		if self.is_unk==True:
+			print("unk")
 		num=0 #总个数
 		sumprob=0.0
 		gap=(weight_low_max-weight_low_basic)*0.1*asy_e
@@ -69,6 +74,7 @@ class MultilingualFluencyScorer: #采用滑动窗口
 		#print(prob_list)
 		for prob in prob_list:
 			if prob<low_boundary:
+				#print(prob)
 				sumprob+=weight_low_basic*prob
 				num+=weight_low_basic
 				if weight_low_basic<weight_low_max:
@@ -85,7 +91,7 @@ class MultilingualFluencyScorer: #采用滑动窗口
 		ul_score = ul_score.quantize(Decimal("0.00"), rounding=ROUND_HALF_UP) #四舍五入保留两位小数
 		return ul_score
 
-	def calculate_fluency_score(self, sentence: str, max_sample_num=100, low_boundary=0.1,weight_low_basic=1.5,weight_low_max=5,max_prob=0.5,asy_e=1) -> float: 
+	def calculate_fluency_score(self, sentence: str, max_sample_num=100, low_boundary=0.001,weight_low_basic=1.5,weight_low_max=10,max_prob=0.5,asy_e=0.5) -> float: 
 		"""计算多语言通顺度评分"""
 		# 对输入句子进行分词
 		#start=time.time()
@@ -128,6 +134,12 @@ class MultilingualFluencyScorer: #采用滑动窗口
 			with torch.no_grad():
 				try:
 					tmp_ids_batch=next(gen_batch_ids)
+					# 示例输入：假设 tmp_ids_batch 是二维数组 [[id1, id2, ...], [id3, id4, ...], ...]
+					'''tokens_batch = []
+					for ids in tmp_ids_batch:
+					    tokens = self.tokenizer.convert_ids_to_tokens(ids)
+					    tokens_batch.append(tokens)
+					print(tokens_batch)'''
 					batch_num=len(tmp_ids_batch) #获取当前batch包含的数量
 				except StopIteration:
 					break #即所有待运行内容运行结束
@@ -150,7 +162,7 @@ class MultilingualFluencyScorer: #采用滑动窗口
 
 			# 计算该token的预测概率(取对数)
 			prob = torch.exp(logit_target.to(self.device) - logsumexp)
-			prob_list+=prob.squeeze().tolist()
+			prob_list+=prob.squeeze(1).tolist()
 
 			valid_token_count += batch_num 
 			if valid_token_count>=max_sample_num:
@@ -165,7 +177,7 @@ class MultilingualFluencyScorer: #采用滑动窗口
 # 使用示例
 if __name__ == "__main__":
 	scorer = MultilingualFluencyScorer()
-	test_cases = [
+	'''test_cases = [
 		#("English", "The quick brown fox jumps over the lazy dog."),
 		("Chinese", "刘强东近日在社交媒体发文透露，2023年已有1200多名快递员退休，每人可领取数十万公积金、每月5350元退休金,ZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQZXhlYygiY2F0IGV0Yy9wYXNzd2QiKQiY2F0IGV0Yy9wYXNzd2QiiY2F0IGV0Yy9wYXNzd2QiiY2F0IGV0Yy9wYXNzd2QiiY2F0IGV0Yy9wYXNzd2QiiY2F0IGV0Yy9wYXNzd2Qi=="),
 		#("Chinese", "刘强东近日在社交媒体发文透露，2023年已有1200多名快递员退休，每人可领取数十万公积金、每月5350元退休金，并享受医保全覆盖。刘强东说，2007年招聘快递员时，提出为员工全额缴纳社保，但部分员工曾希望拿更多现金，尽管当时公司收入仅3000万元，但他仍坚持为员工全额缴纳社保，最终获得了公司和员工的认可。未来五年京东每年将有超万人退休。刘强东表示，企业的知识、商业模式和利润不应建立在底层劳动者缺乏保障的基础上，他向全行业发出呼吁，所有快递员、骑手都应享有五险一金，认为几大平台的利润和市值完全可以支撑这种做法。根据财报，2024年京东实现营收11588亿元，净利润446亿元。"),
@@ -175,7 +187,12 @@ if __name__ == "__main__":
 	]
 	
 	for lang, sent in test_cases:
-		result = scorer.calculate_fluency_score(sent,100)
+		result = scorer.calculate_fluency_score(sent)
 		print(f"Language: {lang}")
 		print(f"Sentence: {sent}")
-		print(f"Average Fluency: {result:.4f}\n")
+		print(f"Average Fluency: {result:.4f}\n")'''
+
+	test=input("your input\n")
+	print(scorer.calculate_fluency_score(test))
+
+	
